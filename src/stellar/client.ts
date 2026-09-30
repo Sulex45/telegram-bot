@@ -102,6 +102,12 @@ function explorerPart(value: string): string {
 
 /** Explorer link for a transaction hash, used in notification footers. */
 export function txExplorerUrl(config: StellarConfig, txHash: string): string {
+  const network =
+    config.networkPassphrase === "Public Global Stellar Network ; September 2015"
+      ? "public"
+      : "testnet";
+  return `https://stellar.expert/explorer/${network}/tx/${txHash}`;
+}
   const hash = txHash.trim();
   if (!hash || !/^[a-fA-F0-9]{64}$/.test(hash)) return "";
   const network = explorerNetworkSegment(config);
