@@ -662,14 +662,23 @@ export async function quarantineCorruptCursorFile(
   const dest = cursorQuarantinePath(cursorFile, at);
   try {
     await rename(cursorFile, dest);
-    console.warn(
+    Logger.warn(
+      "poller",
       `[poller] cursor file unreadable, starting cold: quarantined it to ${dest} (${reason})`,
+      { action: "cursor_quarantined", cursorFile, quarantined: dest, reason },
     );
     return dest;
   } catch (err) {
-    console.warn(
+    Logger.warn(
+      "poller",
       `[poller] cursor file unreadable, starting cold: could not quarantine ${cursorFile}: ` +
         `${safeErrorMessage(err, [])}; the file was left in place (${reason})`,
+      {
+        action: "cursor_quarantine_failed",
+        cursorFile,
+        reason,
+        error: safeErrorMessage(err, []),
+      },
     );
     return null;
   }
@@ -1329,11 +1338,22 @@ export function createPoller(deps: PollerDeps) {
           detail: [...state.values()].map((t) => `${t.source}@${t.cursor ?? "none"}`).join(" "),
         }),
       );
-      console.log(
+      Logger.info(
+        "poller",
         `[poller] resumed from ${config.cursorFile}: ` +
           [...state.values()]
             .map((t) => `${t.source}@${cursorPreview(t.cursor)}`)
             .join(" "),
+        {
+          action: "resume",
+          cursorFile: config.cursorFile,
+          targets: [...state.values()].map((t) => ({
+            source: t.source,
+            cursor: t.cursor,
+            lastEventLedger: t.lastEventLedger,
+            rewindFromLedger: t.rewindFromLedger,
+          })),
+        },
       );
     } catch (err) {
       // Quarantine then cold-start: never wedge on a corrupt state file, and
@@ -1402,7 +1422,11 @@ export function createPoller(deps: PollerDeps) {
       // the file it stays ahead, so a later cycle — or the shutdown flush —
       // retries. If nothing had changed, write-then-rename left the old file
       // intact and there is still nothing to flush.
-      console.error(`[poller] could not persist cursor (${reason}): ${errorMessage(err)}`);
+      Logger.error(
+        "poller",
+        `[poller] could not persist cursor (${reason}): ${errorMessage(err)}`,
+        { action: "cursor_persist_failed", reason, error: errorMessage(err) },
+      );
       audit.recordError(err, "cursor_persist_failed");
       return false;
     }
@@ -1576,6 +1600,13 @@ export function createPoller(deps: PollerDeps) {
             (event.payload.reason
               ? ` (${boundedLabel(event.payload.reason, 160)})`
               : ""),
+          {
+            action: "event_skipped",
+            source: event.source,
+            eventName: boundedLabel(event.payload.eventName, 80),
+            ledger: event.ledger,
+            reason: boundedLabel(event.payload.reason ?? "", 160),
+          },
         );
         continue;
       }
@@ -1624,10 +1655,17 @@ export function createPoller(deps: PollerDeps) {
       } catch (err) {
         status.eventsSkipped += 1;
         skipped += 1;
-        console.error(
+        Logger.error(
+          "poller",
           `[poller] format failed for ${event.source} event at ledger ${event.ledger}: ` +
             errorMessage(err),
-          { eventId: event.eventId, reason: "malformed_event" },
+          {
+            action: "format_failed",
+            eventId: event.eventId,
+            source: event.source,
+            ledger: event.ledger,
+            error: errorMessage(err),
+          },
         );
         continue;
       }
@@ -1694,6 +1732,13 @@ export function createPoller(deps: PollerDeps) {
         console.warn(
           `[poller] correlation=${correlationId} cycle notification cap (${config.maxNotificationsPerCycle}) reached; ` +
             `dropping ${event.payload.name} at ledger ${event.ledger}`,
+          {
+            action: "notification_cap_reached",
+            maxNotificationsPerCycle: config.maxNotificationsPerCycle,
+            droppedEvent: event.payload.name,
+            source: event.source,
+            ledger: event.ledger,
+          },
         );
         continue;
       }
@@ -2194,6 +2239,12 @@ for (const event of knownEvents) {
           logSampledError(
             `scan:${target.source}`,
             `[poller] ${target.source} scan failed${staleCursor ? " (stale cursor)" : ""}: ${message}`,
+            {
+              action: "scan_failed",
+              source: target.source,
+              staleCursor,
+              error: message,
+            },
           );
           if (staleCursor) {
             audit.record(
@@ -2397,6 +2448,12 @@ for (const event of knownEvents) {
         `[poller] watching market=${config.marketContractId} (${config.marketContractVersion}) ` +
           `squad=${config.squadContractId} (${config.squadContractVersion}) ` +
           `every ${config.pollIntervalMs}ms`,
+        {
+          action: "start",
+          marketContractId: config.marketContractId,
+          squadContractId: config.squadContractId,
+          pollIntervalMs: config.pollIntervalMs,
+        },
       );
       await persistStatus();
       await flushAudit();
@@ -2419,7 +2476,9 @@ for (const event of knownEvents) {
       resumePending = false;
       if (timer) clearTimeout(timer);
       timer = null;
-      console.log("[poller] paused by operator; an in-flight cycle may finish");
+      Logger.info("poller", "[poller] paused by operator; an in-flight cycle may finish", {
+        action: "paused",
+      });
       return "paused";
     },
 
@@ -2428,7 +2487,9 @@ for (const event of knownEvents) {
       if (!paused) return "already-running";
       paused = false;
       status.paused = false;
-      console.log("[poller] resumed by operator; next cycle starts now");
+      Logger.info("poller", "[poller] resumed by operator; next cycle starts now", {
+        action: "resumed",
+      });
       if (inFlight) {
         resumePending = true;
       } else {
